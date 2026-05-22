@@ -5,7 +5,7 @@ cuda-demystify · nvcc pipeline inspector
 Strategy
 --------
 1. Run `nvcc --dryrun` to get the exact sub-commands nvcc would execute.
-2. Redirect every temp-file path from /tmp → <outdir>/temps/ so all
+2. Redirect every temp-file path from /tmp → <outdir>/tmp/ so all
    intermediate products land in a controlled directory.
 3. Replay each sub-command individually via bash.
 4. After each step, copy the newly produced files into the step's own
@@ -29,7 +29,7 @@ Output layout
   cuobjdump/
     <name>_sass.txt  <name>_ptx.txt  <name>_elf.txt
   executable
-  temps/                     shared execution dir (full file set)
+  tmp/                       all intermediate files
 """
 
 from __future__ import annotations
@@ -205,7 +205,7 @@ def write_run_sh(step_dir: Path, n: int, desc: str, cmd: str,
         f.write("#!/usr/bin/env bash\n")
         f.write(f"# Step {n}: {desc}\n")
         f.write("# Re-run this step in isolation.\n")
-        f.write("# Input files are read from the shared temps/ directory.\n\n")
+        f.write("# Input files are read from the shared tmp/ directory.\n\n")
         f.write("set -euo pipefail\n\n")
         if var_lines:
             f.write("# nvcc environment variables\n")
@@ -349,7 +349,7 @@ def main() -> None:
         else Path(f".cuda-demystify/{ts}").resolve()
     )
     outdir.mkdir(parents=True, exist_ok=True)
-    temps_dir = outdir / "temps"
+    temps_dir = outdir / "tmp"
     temps_dir.mkdir(exist_ok=True)
     exe_path = outdir / "executable"
 
@@ -409,8 +409,6 @@ def main() -> None:
         r = run_step(i, len(exec_steps), s["cmd"], var_lines, outdir, temps_dir)
         results.append(r)
 
-    # Remove temps/ — all produced files have been copied to step dirs
-    shutil.rmtree(temps_dir, ignore_errors=True)
 
     # ── final summary ─────────────────────────────────────────────────────────
     section("Summary")

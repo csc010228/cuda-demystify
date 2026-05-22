@@ -60,6 +60,7 @@ python3 compile.py vector_add.cu -o ./run-01 -- -arch=sm_80 -lineinfo -G
   step_11_host_link/
     run.sh  output.log
   executable
+  tmp/                        # all intermediate files (full set)
 ```
 
 ## Pipeline and intermediate files
