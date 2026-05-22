@@ -49,4 +49,4 @@ venv/
 *.ncu-rep
 
 # Ignore reports
-.data/
+.cuda-demystify/
