@@ -3,6 +3,7 @@
 *.obj
 *.so
 *.a
+!third_party/nvbit_release_x86_64/core/libnvbit.a
 *.lib
 *.dll
 *.exe

@@ -1,0 +1,172 @@
+#!/usr/bin/env bpftrace
+/*
+ * uvm_perf_event_notify.bt
+ *
+ * Trace uvm_perf_event_notify() in the NVIDIA UVM kernel module and decode the
+ * uvm_perf_event_data_t union that is handed to every perf-event callback.
+ *
+ *   void uvm_perf_event_notify(uvm_perf_va_space_events_t *va_space_events,  // arg0
+ *                              uvm_perf_event_t           event_id,          // arg1
+ *                              uvm_perf_event_data_t     *event_data);       // arg2
+ *
+ * The out-of-tree nvidia-uvm module ships no BTF, so the union fields are read
+ * with hand-computed byte offsets instead of named struct access. Offsets were
+ * derived from kernel-open/nvidia-uvm/uvm_perf_events.h (nvidia-uvm 580.76.05)
+ * assuming the LP64 layout:
+ *     pointer            : 8 bytes, align 8
+ *     uvm_processor_id_t : { NvU32 val }      -> 4 bytes, align 4
+ *     uvm_page_index_t   : NvU16 (2MB block)  -> 2 bytes
+ *     NvU64              : 8 bytes   NvU32 : 4   NvS16 : 2   bool : 1
+ *     enums (transfer_mode / cause / prot)    -> 4 bytes
+ *
+ * CPU is processor id 0 (UVM_ID_CPU_VALUE == 0); GPUs are >= 1.
+ *
+ * Run:  sudo bpftrace uvm_perf_event_notify.bt
+ */
+
+BEGIN
+{
+    @event_name[0] = "BLOCK_DESTROY";
+    @event_name[1] = "BLOCK_SHRINK";
+    @event_name[2] = "BLOCK_MUNMAP";
+    @event_name[3] = "RANGE_DESTROY";
+    @event_name[4] = "RANGE_SHRINK";
+    @event_name[5] = "MODULE_UNLOAD";
+    @event_name[6] = "FAULT";
+    @event_name[7] = "MIGRATION";
+    @event_name[8] = "REVOCATION";
+    printf("Tracing uvm_perf_event_notify()... Hit Ctrl-C to end.\n\n");
+}
+
+kprobe:uvm_perf_event_notify
+{
+    $ev   = arg1 & 0xffffffff;
+    $data = arg2;
+
+    printf("[%s] %-6d %-16s vsp=%p %-13s ",
+           strftime("%H:%M:%S", nsecs), pid, comm, arg0, @event_name[$ev]);
+
+    /* ---- block-only events: union { uvm_va_block_t *block; } ---- */
+    if ($ev == 0 || $ev == 1) {                 // BLOCK_DESTROY / BLOCK_SHRINK
+        printf("block=%p\n", *(uint64*)($data + 0));
+    }
+
+    /* ---- BLOCK_MUNMAP: block @0, region{first@8, outer@10} ---- */
+    else if ($ev == 2) {
+        printf("block=%p region=[%u, %u)\n",
+               *(uint64*)($data + 0),
+               *(uint16*)($data + 8),
+               *(uint16*)($data + 10));
+    }
+
+    /* ---- range-only events: union { uvm_va_range_t *range; } ---- */
+    else if ($ev == 3 || $ev == 4) {            // RANGE_DESTROY / RANGE_SHRINK
+        printf("range=%p\n", *(uint64*)($data + 0));
+    }
+
+    /* ---- MODULE_UNLOAD: module@0, block@8, range@16 ---- */
+    else if ($ev == 5) {
+        printf("module=%p block=%p range=%p\n",
+               *(uint64*)($data + 0),
+               *(uint64*)($data + 8),
+               *(uint64*)($data + 16));
+    }
+
+    /* ---- FAULT ----------------------------------------------------------
+     *   block               @0   (uvm_va_block_t *)
+     *   proc_id.val         @8   (NvU32)   faulting processor (0 == CPU)
+     *   preferred_location  @12  (NvU32)
+     *   union @16 {
+     *       gpu { buffer_entry@16(ptr), batch_id@24(u32), is_duplicate@28(u8) }
+     *       cpu { fault_va@16(u64), cpu_num@24(u32), is_write@28(u8), pc@32(u64) }
+     *   }
+     */
+    else if ($ev == 6) {
+        $proc = *(uint32*)($data + 8);
+        $pref = *(uint32*)($data + 12);
+        $block = *(uint64*)($data + 0);
+        if ($proc == 0) {                       // CPU fault
+            printf("CPU  block=%p pref_loc=%u va=0x%lx %s cpu=%u pc=0x%lx\n",
+                   $block, $pref,
+                   *(uint64*)($data + 16),
+                   *(uint8*)($data + 28) ? "W" : "R",
+                   *(uint32*)($data + 24),
+                   *(uint64*)($data + 32));
+        } else {                                // GPU fault
+            printf("GPU  block=%p gpu_id=%u pref_loc=%u batch=%u dup=%u entry=%p\n",
+                   $block, $proc, $pref,
+                   *(uint32*)($data + 24),
+                   *(uint8*)($data + 28),
+                   *(uint64*)($data + 16));
+        }
+    }
+
+    /* ---- MIGRATION ------------------------------------------------------
+     *   push / cpu_start_timestamp  @0   (union, 8 bytes)
+     *   block                       @8   (ptr)
+     *   dst.val                     @16  (NvU32)
+     *   src.val                     @20  (NvU32)
+     *   dst_nid                     @24  (NvS16)
+     *   src_nid                     @26  (NvS16)
+     *   address                     @32  (NvU64)
+     *   bytes                       @40  (NvU64)
+     *   transfer_mode               @48  (enum: 1=MOVE 2=COPY)
+     *   access_counters_buf_index   @52  (NvU32)
+     *   cause                       @56  (enum)
+     *   make_resident_context       @64  (ptr)
+     */
+    else if ($ev == 7) {
+        $mode = *(uint32*)($data + 48);
+        $cause = *(uint32*)($data + 56);
+        printf("block=%p %u->%u nid %d->%d addr=0x%lx bytes=%lu mode=%s cause=%s\n",
+               *(uint64*)($data + 8),
+               *(uint32*)($data + 16),          // dst
+               *(uint32*)($data + 20),          // src
+               *(int16*)($data + 24),           // dst_nid
+               *(int16*)($data + 26),           // src_nid
+               *(uint64*)($data + 32),          // address
+               *(uint64*)($data + 40),          // bytes
+               $mode == 1 ? "MOVE" : $mode == 2 ? "COPY" : "?",
+               $cause == 0 ? "REPLAYABLE_FAULT"     :
+               $cause == 1 ? "NON_REPLAYABLE_FAULT" :
+               $cause == 2 ? "ACCESS_COUNTER"       :
+               $cause == 3 ? "PREFETCH"             :
+               $cause == 4 ? "EVICTION"             :
+               $cause == 5 ? "API_TOOLS"            :
+               $cause == 6 ? "API_MIGRATE"          :
+               $cause == 7 ? "API_SET_RANGE_GROUP"  :
+               $cause == 8 ? "API_HINT" : "?");
+    }
+
+    /* ---- REVOCATION -----------------------------------------------------
+     *   block      @0   (ptr)
+     *   proc_id    @8   (NvU32)
+     *   address    @16  (NvU64)
+     *   bytes      @24  (NvU64)
+     *   old_prot   @32  (enum: 0 NONE 1 RO 2 RW 3 RW_ATOMIC)
+     *   new_prot   @36  (enum)
+     */
+    else if ($ev == 8) {
+        $op = *(uint32*)($data + 32);
+        $np = *(uint32*)($data + 36);
+        printf("block=%p proc=%u addr=0x%lx bytes=%lu %s -> %s\n",
+               *(uint64*)($data + 0),
+               *(uint32*)($data + 8),
+               *(uint64*)($data + 16),
+               *(uint64*)($data + 24),
+               $op == 0 ? "NONE" : $op == 1 ? "RO" : $op == 2 ? "RW" : $op == 3 ? "RW_ATOMIC" : "?",
+               $np == 0 ? "NONE" : $np == 1 ? "RO" : $np == 2 ? "RW" : $np == 3 ? "RW_ATOMIC" : "?");
+    }
+
+    else {
+        printf("(unknown event id)\n");
+    }
+
+    @count[@event_name[$ev]] = count();
+}
+
+END
+{
+    clear(@event_name);
+    printf("\n");
+}

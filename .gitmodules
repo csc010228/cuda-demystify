@@ -4,3 +4,6 @@
 [submodule "third_party/bpftrace"]
 	path = third_party/bpftrace
 	url = https://github.com/bpftrace/bpftrace
+[submodule "third_party/open-gpu-kernel-modules"]
+	path = third_party/open-gpu-kernel-modules
+	url = https://github.com/NVIDIA/open-gpu-kernel-modules.git

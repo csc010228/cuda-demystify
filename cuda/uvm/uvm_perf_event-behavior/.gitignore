@@ -1,0 +1,8 @@
+# compiled benchmark binaries (sources are *.cu / *.cuh)
+benchmarks/malloc-managed
+benchmarks/first-touch-page-fault
+benchmarks/page-fault
+benchmarks/eviction
+benchmarks/api-prefetch
+benchmarks/api-discard
+benchmarks/api-discard-and-prefetch
